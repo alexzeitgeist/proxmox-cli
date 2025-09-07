@@ -1,0 +1,63 @@
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.coverage
+.pytest_cache/
+.tox/
+htmlcov/
+
+# Temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+# UV tool
+.uv/
+
+# Local development files
+diff.txt
+scripts/
+docs/
+
+# Markdown: ignore all except root README
+*.md
+!/README.md
