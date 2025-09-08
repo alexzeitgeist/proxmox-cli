@@ -46,6 +46,7 @@ def create_parser():
     info_group.add_argument('--name', help='VM name')
     info_parser.add_argument('--node', help='Node name (optional, will auto-detect)')
     info_parser.add_argument('--with-osinfo', action='store_true', help='Query guest OS and hostname via QEMU Guest Agent')
+    info_parser.add_argument('--with-stats', action='store_true', help='Include last-hour averages (RRD) for CPU/memory/network/disk')
 
     # Start VM command
     start_parser = subparsers.add_parser('start', help='Start a VM')

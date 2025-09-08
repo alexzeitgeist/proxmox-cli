@@ -389,6 +389,7 @@ class CLICommands:
             firmware: Optional[str] = None
             secure_boot: Optional[bool] = None
             disk_total_bytes: int = 0
+            stats: Optional[Dict[str, Any]] = None
             try:
                 if status.get('status') == 'running' and status.get('agent'):
                     guest_ips = self.client.get_vm_guest_ips(vmid, runtime.get('node')) or []
@@ -399,6 +400,43 @@ class CLICommands:
                         guest_hostname = self.client.get_vm_guest_hostname(vmid, runtime.get('node'))
             except Exception:
                 guest_ips = []
+            # Optional RRD stats (last hour average)
+            if getattr(args, 'with_stats', False):
+                try:
+                    rrd = self.client.retry(lambda: self.client.proxmox.nodes(runtime.get('node')).qemu(vmid).rrddata.get(timeframe='hour', cf='AVERAGE'))
+                    samples = [s for s in (rrd or []) if isinstance(s, dict)]
+                    n = len(samples)
+                    if n > 0:
+                        def avg(key, scale=1.0):
+                            vals = [float(s.get(key)) for s in samples if s.get(key) is not None]
+                            return (sum(vals) / len(vals)) * scale if vals else None
+                        cpu_pct_avg = avg('cpu', 100.0)
+                        # mem percent: average of mem/maxmem per sample
+                        mem_fracs = []
+                        for s in samples:
+                            m = s.get('mem'); mm = s.get('maxmem')
+                            if m is not None and mm:
+                                try:
+                                    mem_fracs.append(float(m)/float(mm))
+                                except Exception:
+                                    pass
+                        mem_pct_avg = (sum(mem_fracs)/len(mem_fracs)*100.0) if mem_fracs else None
+                        net_in_mb = avg('netin', 1.0/ (1024**2))
+                        net_out_mb = avg('netout', 1.0/ (1024**2))
+                        disk_r_mb = avg('diskread', 1.0/ (1024**2))
+                        disk_w_mb = avg('diskwrite', 1.0/ (1024**2))
+                        stats = {
+                            'period': 'hour',
+                            'samples': n,
+                            'cpu_pct_avg': round(cpu_pct_avg, 1) if cpu_pct_avg is not None else None,
+                            'mem_pct_avg': round(mem_pct_avg, 1) if mem_pct_avg is not None else None,
+                            'net_in_MBps_avg': round(net_in_mb, 2) if net_in_mb is not None else None,
+                            'net_out_MBps_avg': round(net_out_mb, 2) if net_out_mb is not None else None,
+                            'disk_read_MBps_avg': round(disk_r_mb, 2) if disk_r_mb is not None else None,
+                            'disk_write_MBps_avg': round(disk_w_mb, 2) if disk_w_mb is not None else None,
+                        }
+                except Exception:
+                    stats = None
             cfg = config or {}
             if isinstance(cfg, dict):
                 tpm = cfg.get('tpmstate0')
@@ -451,6 +489,7 @@ class CLICommands:
                 'firmware': firmware,
                 'secure_boot': secure_boot,
                 'disk_total_bytes': disk_total_bytes,
+                'stats': stats,
             }
             self._output_result(combined)
             return
@@ -556,6 +595,44 @@ class CLICommands:
             console.print("  Network I/O:")
             console.print(f"    In: {status.get('netin', 0) / (1024**2):.2f} MB")
             console.print(f"    Out: {status.get('netout', 0) / (1024**2):.2f} MB")
+
+        # Optional RRD stats line
+        if getattr(args, 'with_stats', False):
+            try:
+                rrd = self.client.retry(lambda: self.client.proxmox.nodes(vm_node).qemu(vmid).rrddata.get(timeframe='hour', cf='AVERAGE'))
+                samples = [s for s in (rrd or []) if isinstance(s, dict)]
+                n = len(samples)
+                if n > 0:
+                    def avg(key, scale=1.0):
+                        vals = [float(s.get(key)) for s in samples if s.get(key) is not None]
+                        return (sum(vals) / len(vals)) * scale if vals else None
+                    cpu_pct_avg = avg('cpu', 100.0)
+                    mem_fracs = []
+                    for s in samples:
+                        m = s.get('mem'); mm = s.get('maxmem')
+                        if m is not None and mm:
+                            try:
+                                mem_fracs.append(float(m)/float(mm))
+                            except Exception:
+                                pass
+                    mem_pct_avg = (sum(mem_fracs)/len(mem_fracs)*100.0) if mem_fracs else None
+                    net_in_mb = avg('netin', 1.0/ (1024**2))
+                    net_out_mb = avg('netout', 1.0/ (1024**2))
+                    disk_r_mb = avg('diskread', 1.0/ (1024**2))
+                    disk_w_mb = avg('diskwrite', 1.0/ (1024**2))
+                    parts = []
+                    if cpu_pct_avg is not None:
+                        parts.append(f"CPU {cpu_pct_avg:.1f}%")
+                    if mem_pct_avg is not None:
+                        parts.append(f"Mem {mem_pct_avg:.1f}%")
+                    if net_in_mb is not None and net_out_mb is not None:
+                        parts.append(f"Net {net_in_mb:.2f}/{net_out_mb:.2f} MB/s")
+                    if disk_r_mb is not None and disk_w_mb is not None:
+                        parts.append(f"Disk {disk_r_mb:.2f}/{disk_w_mb:.2f} MB/s")
+                    if parts:
+                        console.print("  Stats (last hour avg): " + ", ".join(parts))
+            except Exception:
+                pass
 
         lock = self.client.check_vm_lock(vmid, vm_node, status=status)
         if lock:
