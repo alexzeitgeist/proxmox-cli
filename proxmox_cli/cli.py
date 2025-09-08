@@ -85,6 +85,13 @@ def create_parser():
     resume_parser.add_argument('--node', help='Node name (optional, will auto-detect)')
     resume_parser.add_argument('--wait', action='store_true', help='Wait for operation to complete')
 
+    # Cluster overview
+    subparsers.add_parser('cluster', help='Show cluster overview (version, nodes, VM counts)')
+
+    # Node status
+    node_parser = subparsers.add_parser('node', help='Show node status summary')
+    node_parser.add_argument('--node', help='Node name (defaults to the only node when single-node)')
+
     return parser
 
 
@@ -122,6 +129,8 @@ def main():
         'stop': commands.stop_vm,
         'suspend': commands.suspend_vm,
         'resume': commands.resume_vm,
+        'cluster': commands.cluster_overview,
+        'node': commands.node_status,
     }
 
     handler = command_map.get(args.command)

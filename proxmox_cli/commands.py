@@ -62,6 +62,149 @@ class CLICommands:
             if not args.yes and not Confirm.ask(prompt_text):
                 sys.exit(ExitCode.SUCCESS.value)
 
+    def cluster_overview(self, args):
+        """Show cluster version, node list, and VM counts by status and node."""
+        # Fetch data
+        try:
+            version = self.client.retry(self.client.proxmox.version.get)
+        except Exception as e:
+            err_console.print(f"[red]Failed to get version: {e}[/red]")
+            sys.exit(ExitCode.SERVER_ERROR.value)
+
+        try:
+            cluster = self.client.retry(self.client.proxmox.cluster.status.get)
+        except Exception:
+            cluster = []
+
+        try:
+            vms = self.client.get_cluster_vms()
+        except Exception as e:
+            err_console.print(f"[red]Failed to list VMs: {e}[/red]")
+            sys.exit(ExitCode.SERVER_ERROR.value)
+
+        # Derive fields
+        ver = (version or {}).get('version') or (version or {}).get('data', {}).get('version')
+        cluster_name = None
+        quorate = None
+        if isinstance(cluster, list):
+            for entry in cluster:
+                if entry.get('type') == 'cluster':
+                    cluster_name = entry.get('name')
+                    quorate = entry.get('quorate')
+                    break
+
+        node_names = sorted({vm.get('node') for vm in vms if vm.get('node')})
+        # If cluster status includes nodes, merge for completeness
+        if isinstance(cluster, list):
+            node_names = sorted(set(node_names) | {e.get('name') for e in cluster if e.get('type') == 'node' and e.get('name')})
+
+        by_status: Dict[str, int] = {}
+        by_node: Dict[str, int] = {}
+        total = 0
+        for vm in vms:
+            if vm.get('type') != 'qemu':
+                continue
+            st = vm.get('status') or 'unknown'
+            st = 'suspended' if st == 'paused' else st
+            by_status[st] = by_status.get(st, 0) + 1
+            nd = vm.get('node') or 'unknown'
+            by_node[nd] = by_node.get(nd, 0) + 1
+            total += 1
+
+        if self.output_format == 'json':
+            out = {
+                'version': ver,
+                'cluster_name': cluster_name,
+                'nodes': node_names,
+                'vms_total': total,
+                'vms_by_status': by_status,
+                'vms_by_node': by_node,
+                'quorum': bool(quorate) if quorate is not None else None,
+            }
+            self._output_result(out)
+            return
+
+        # Table output
+        console.print("[bold cyan]\n═══ Cluster Overview ═══[/bold cyan]")
+        if ver:
+            console.print(f"Version: {ver}")
+        if cluster_name:
+            console.print(f"Cluster name: {cluster_name}")
+        if quorate is not None:
+            console.print(f"Quorum: {'yes' if quorate else 'no'}")
+        console.print(f"Nodes ({len(node_names)}): {', '.join(node_names) if node_names else '-'}")
+        console.print(f"VMs: {total} total")
+        if by_status:
+            status_line = ", ".join(f"{k}={by_status[k]}" for k in sorted(by_status.keys()))
+            console.print(f"  by status: {status_line}")
+        if by_node:
+            node_line = ", ".join(f"{k}={by_node[k]}" for k in sorted(by_node.keys()))
+            console.print(f"  by node:   {node_line}")
+
+    def node_status(self, args):
+        """Show status summary for a node."""
+        # Determine node
+        node = getattr(args, 'node', None)
+        if not node:
+            try:
+                nodes = self.client.get_nodes()
+            except Exception:
+                nodes = []
+            names = [n.get('node') for n in nodes if n.get('node')]
+            if len(names) == 1:
+                node = names[0]
+            else:
+                err_console.print("[red]Please specify --node (multiple nodes detected).[/red]")
+                sys.exit(ExitCode.INVALID_INPUT.value)
+
+        # Fetch node status
+        try:
+            st = self.client.retry(lambda: self.client.proxmox.nodes(node).status.get())
+        except Exception as e:
+            err_console.print(f"[red]Failed to get node status for {node}: {e}[/red]")
+            sys.exit(ExitCode.SERVER_ERROR.value)
+
+        # Extract metrics
+        cpu_pct = round((st.get('cpu') or 0) * 100, 1)
+        mem_total = st.get('memory', {}).get('total') or st.get('maxmem')
+        mem_used = st.get('memory', {}).get('used') or st.get('mem')
+        mem_pct = round(((mem_used or 0) / (mem_total or 1)) * 100, 1) if mem_total else 0.0
+        root_total = st.get('rootfs', {}).get('total') or st.get('maxdisk')
+        root_used = st.get('rootfs', {}).get('used') or st.get('disk')
+        root_pct = round(((root_used or 0) / (root_total or 1)) * 100, 1) if root_total else 0.0
+        uptime = int(st.get('uptime') or 0)
+        cpuinfo = st.get('cpuinfo') or {}
+        model = cpuinfo.get('model')
+        sockets = cpuinfo.get('sockets') or 1
+        cores = cpuinfo.get('cores') or 1
+        cpus = cpuinfo.get('cpus') or (sockets * cores)
+        kernel = st.get('current-kernel') or {}
+
+        if self.output_format == 'json':
+            out = {
+                'node': node,
+                'cpu_pct': cpu_pct,
+                'mem_pct': mem_pct,
+                'rootfs_pct': root_pct,
+                'uptime_s': uptime,
+                'cpuinfo': cpuinfo,
+                'kernel': kernel,
+            }
+            self._output_result(out)
+            return
+
+        # Table-ish output
+        console.print(f"[bold cyan]\n═══ Node Status - {node} ═══[/bold cyan]")
+        if model:
+            console.print(f"CPU: {model}")
+        console.print(f"Topology: sockets={sockets}, cores/socket={cores}, vCPUs={cpus}")
+        if kernel:
+            console.print(f"Kernel: {kernel.get('release', '-')}")
+        console.print(f"Uptime: {uptime // 3600}h {(uptime % 3600) // 60}m")
+        console.print(f"CPU Usage: {cpu_pct}%")
+        console.print(f"Memory Used: {mem_pct}%")
+        console.print(f"RootFS Used: {root_pct}%")
+
     def list_vms(self, args):
         tags = [t.strip() for t in args.tags.split(',') if t.strip()] if args.tags else None
         vms = self.client.get_vms(node=args.node, tags=tags)

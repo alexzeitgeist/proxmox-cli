@@ -43,6 +43,12 @@ proxmox-cli stop 100 --yes
 
 # JSON output for scripting
 proxmox-cli --output json list
+
+# Cluster overview (version, nodes, VM counts)
+proxmox-cli cluster
+
+# Node status summary
+proxmox-cli node --node pve
 ```
 
 ## Configuration
