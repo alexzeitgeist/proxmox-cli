@@ -82,6 +82,21 @@ class CLICommands:
             err_console.print(f"[red]Failed to list VMs: {e}[/red]")
             sys.exit(ExitCode.SERVER_ERROR.value)
 
+        # Optional: cluster storage summary (single extra call)
+        storage_summary = {}
+        try:
+            stor = self.client.retry(lambda: self.client.proxmox.cluster.resources.get(type='storage'))
+            for s in stor or []:
+                name = s.get('storage')
+                if not name:
+                    continue
+                # Sum across nodes
+                st = storage_summary.setdefault(name, {'max': 0, 'used': 0, 'type': s.get('plugintype')})
+                st['max'] += int(s.get('maxdisk') or 0)
+                st['used'] += int(s.get('disk') or 0)
+        except Exception:
+            storage_summary = {}
+
         # Derive fields
         ver = (version or {}).get('version') or (version or {}).get('data', {}).get('version')
         cluster_name = None
@@ -120,6 +135,14 @@ class CLICommands:
                 'vms_by_status': by_status,
                 'vms_by_node': by_node,
                 'quorum': bool(quorate) if quorate is not None else None,
+                'storage': {
+                    name: {
+                        'bytes_total': v['max'],
+                        'bytes_used': v['used'],
+                        'pct_used': round((v['used'] / v['max'] * 100), 1) if v['max'] else 0.0,
+                        'type': v.get('type'),
+                    } for name, v in storage_summary.items()
+                } if storage_summary else {},
             }
             self._output_result(out)
             return
@@ -140,6 +163,16 @@ class CLICommands:
         if by_node:
             node_line = ", ".join(f"{k}={by_node[k]}" for k in sorted(by_node.keys()))
             console.print(f"  by node:   {node_line}")
+        if storage_summary:
+            # Print top 3 by used percent
+            def pct(v):
+                return (v['used'] / v['max'] * 100) if v['max'] else 0.0
+            top = sorted(storage_summary.items(), key=lambda kv: pct(kv[1]), reverse=True)[:3]
+            parts = []
+            for name, v in top:
+                p = pct(v)
+                parts.append(f"{name}={p:.1f}%")
+            console.print("Storage (top usage): " + (", ".join(parts) if parts else "-"))
 
     def node_status(self, args):
         """Show status summary for a node."""
@@ -179,6 +212,15 @@ class CLICommands:
         cores = cpuinfo.get('cores') or 1
         cpus = cpuinfo.get('cpus') or (sockets * cores)
         kernel = st.get('current-kernel') or {}
+        loadavg = st.get('loadavg') or []
+        bootinfo = (st.get('boot-info') or {}) if isinstance(st.get('boot-info'), dict) else {}
+
+        # Optional: per-node storage summary
+        node_storage = []
+        try:
+            node_storage = self.client.retry(lambda: self.client.proxmox.nodes(node).storage.get()) or []
+        except Exception:
+            node_storage = []
 
         if self.output_format == 'json':
             out = {
@@ -189,6 +231,18 @@ class CLICommands:
                 'uptime_s': uptime,
                 'cpuinfo': cpuinfo,
                 'kernel': kernel,
+                'loadavg': loadavg,
+                'boot': bootinfo,
+                'storage': [
+                    {
+                        'name': s.get('storage'),
+                        'bytes_total': int(s.get('total') or 0),
+                        'bytes_used': int(s.get('used') or 0),
+                        'pct_used': round((int(s.get('used') or 0) / int(s.get('total') or 1) * 100), 1) if s.get('total') else 0.0,
+                        'type': s.get('type'),
+                        'active': bool(s.get('active')),
+                    } for s in node_storage if s.get('total')
+                ],
             }
             self._output_result(out)
             return
@@ -204,6 +258,25 @@ class CLICommands:
         console.print(f"CPU Usage: {cpu_pct}%")
         console.print(f"Memory Used: {mem_pct}%")
         console.print(f"RootFS Used: {root_pct}%")
+        if loadavg:
+            console.print(f"Load Avg: {' '.join(loadavg[:3])}")
+        if bootinfo:
+            mode = bootinfo.get('mode')
+            sb = bootinfo.get('secureboot')
+            if mode:
+                console.print(f"Boot: {mode.upper()} (SecureBoot: {'on' if sb else 'off'})")
+        # Node storage (top few by usage)
+        if node_storage:
+            def pct_s(s):
+                tot = int(s.get('total') or 0)
+                usd = int(s.get('used') or 0)
+                return (usd / tot * 100) if tot else 0.0
+            top = sorted([s for s in node_storage if s.get('total')], key=pct_s, reverse=True)[:5]
+            if top:
+                console.print("Storage:")
+                for s in top:
+                    p = pct_s(s)
+                    console.print(f"  - {s.get('storage')}: {p:.1f}% used ({s.get('type')})")
 
     def list_vms(self, args):
         tags = [t.strip() for t in args.tags.split(',') if t.strip()] if args.tags else None
