@@ -168,6 +168,11 @@ class CLICommands:
             primary_ip: Optional[str] = None
             guest_os: Optional[Dict[str, Any]] = None
             guest_hostname: Optional[str] = None
+            console_type: str = "spice" if bool(status.get('spice')) else "none"
+            tpm_version: Optional[str] = None
+            firmware: Optional[str] = None
+            secure_boot: Optional[bool] = None
+            disk_total_bytes: int = 0
             try:
                 if status.get('status') == 'running' and status.get('agent'):
                     guest_ips = self.client.get_vm_guest_ips(vmid, runtime.get('node')) or []
@@ -178,6 +183,46 @@ class CLICommands:
                         guest_hostname = self.client.get_vm_guest_hostname(vmid, runtime.get('node'))
             except Exception:
                 guest_ips = []
+            cfg = config or {}
+            if isinstance(cfg, dict):
+                tpm = cfg.get('tpmstate0')
+                if isinstance(tpm, str) and 'version=' in tpm:
+                    for part in tpm.split(','):
+                        if part.startswith('version='):
+                            tpm_version = part.split('=', 1)[1]
+                            break
+                bios = cfg.get('bios')
+                if bios:
+                    firmware = str(bios).lower()
+                efi = cfg.get('efidisk0')
+                if isinstance(efi, str):
+                    secure_boot = 'pre-enrolled-keys=1' in efi
+                for k, v in cfg.items():
+                    if not isinstance(k, str) or not isinstance(v, str):
+                        continue
+                    if not (k.startswith('scsi') or k.startswith('virtio') or k.startswith('sata') or k.startswith('ide')):
+                        continue
+                    if ':' not in v:
+                        continue
+                    size_bytes = 0
+                    parts = v.split(',')
+                    for p in parts:
+                        if p.startswith('size='):
+                            sval = p.split('=', 1)[1].strip()
+                            try:
+                                if sval.lower().endswith('t'):
+                                    size_bytes = int(float(sval[:-1]) * (1024**4))
+                                elif sval.lower().endswith('g'):
+                                    size_bytes = int(float(sval[:-1]) * (1024**3))
+                                elif sval.lower().endswith('m'):
+                                    size_bytes = int(float(sval[:-1]) * (1024**2))
+                                else:
+                                    size_bytes = int(sval)
+                            except Exception:
+                                size_bytes = 0
+                            break
+                    if size_bytes:
+                        disk_total_bytes += size_bytes
             combined = {
                 'status': status,
                 'config': config,
@@ -185,6 +230,11 @@ class CLICommands:
                 'primary_ip': primary_ip,
                 'guest_os': guest_os,
                 'guest_hostname': guest_hostname,
+                'console': console_type,
+                'tpm_version': tpm_version,
+                'firmware': firmware,
+                'secure_boot': secure_boot,
+                'disk_total_bytes': disk_total_bytes,
             }
             self._output_result(combined)
             return
@@ -316,7 +366,10 @@ class CLICommands:
 
         console.print(f"  Memory: {config.get('memory', 0)} MB")
         if config.get('balloon') is not None:
-            console.print(f"    Ballooning: {'Enabled' if config['balloon'] else 'Disabled'}")
+            if str(config.get('balloon')) == '0':
+                console.print("    Ballooning: Disabled (pinned)")
+            else:
+                console.print("    Ballooning: Enabled")
 
         agent_enabled = config.get('agent') == '1' or status.get('agent')
         console.print(f"  QEMU Agent: {'Enabled' if agent_enabled else 'Disabled'}")
@@ -331,6 +384,7 @@ class CLICommands:
             console.print(f"  High Availability: {'Managed' if ha_managed else 'Not managed'}")
 
         console.print("\n[bold]Storage:[/bold]")
+        total_bytes = 0
         for key, value in config.items():
             if key.startswith(('scsi', 'ide', 'sata', 'virtio')) and ':' in str(value):
                 disk_info = str(value).split(',')
@@ -347,9 +401,31 @@ class CLICommands:
                         console.print("    Type: SSD")
                     if disk_params.get('discard'):
                         console.print(f"    Discard: {disk_params['discard']}")
+                size_str = disk_params.get('size') if disk_params else None
+                if size_str:
+                    sval = str(size_str)
+                    try:
+                        if sval.lower().endswith('t'):
+                            total_bytes += int(float(sval[:-1]) * (1024**4))
+                        elif sval.lower().endswith('g'):
+                            total_bytes += int(float(sval[:-1]) * (1024**3))
+                        elif sval.lower().endswith('m'):
+                            total_bytes += int(float(sval[:-1]) * (1024**2))
+                        else:
+                            total_bytes += int(sval)
+                    except Exception:
+                        pass
+        if total_bytes:
+            if total_bytes >= 1024**4:
+                total_tb = total_bytes / (1024**4)
+                console.print(f"  Total provisioned disk: {total_tb:.2f} TB")
+            else:
+                total_gb = total_bytes / (1024**3)
+                console.print(f"  Total provisioned disk: {total_gb:.2f} GB")
 
         if 'nics' in status or any(k.startswith('net') for k in config.keys()):
             console.print("\n[bold]Network:[/bold]")
+            nic_params: List[Dict[str, str]] = []
             for key, value in config.items():
                 if key.startswith('net'):
                     net_info = str(value).split(',')
@@ -368,6 +444,7 @@ class CLICommands:
                     if net_params.get('firewall'):
                         firewall_status = 'Enabled' if net_params['firewall'] == '1' else 'Disabled'
                         console.print(f"    Firewall: {firewall_status}")
+                    nic_params.append(net_params)
 
                     if 'nics' in status and key.replace('net', 'tap') + 'i0' in status['nics']:
                         nic_name = key.replace('net', 'tap') + 'i0'
@@ -376,6 +453,37 @@ class CLICommands:
                         traffic_out = nic_stats.get('netout', 0) / (1024**2)
                         console.print(f"    Traffic In: {traffic_in:.2f} MB")
                         console.print(f"    Traffic Out: {traffic_out:.2f} MB")
+            if nic_params:
+                bridges = [p.get('bridge') for p in nic_params if p.get('bridge')]
+                unique_br = sorted(set(bridges))
+                fw_on = any(p.get('firewall') == '1' for p in nic_params)
+                br_str = unique_br[0] if len(unique_br) == 1 else ','.join(unique_br)
+                fw_str = 'on' if fw_on else 'off'
+                console.print(f"  NICs: {len(nic_params)} (bridge {br_str if br_str else '-'}, firewall {fw_str})")
+
+        # Firmware / Secure Boot / TPM / Console hints
+        bios = str(config.get('bios', '') or '').lower()
+        if bios:
+            if bios == 'ovmf':
+                console.print("\n[bold]Firmware:[/bold] OVMF (UEFI)")
+            else:
+                console.print(f"\n[bold]Firmware:[/bold] {bios}")
+        efid = str(config.get('efidisk0', '') or '')
+        if efid and 'pre-enrolled-keys=1' in efid:
+            console.print("[bold]Secure Boot keys:[/bold] pre-enrolled")
+        tpm = str(config.get('tpmstate0', '') or '')
+        if tpm:
+            tver = None
+            for part in tpm.split(','):
+                if part.startswith('version='):
+                    tver = part.split('=', 1)[1]
+                    break
+            console.print(f"[bold]TPM:[/bold] {tver}" if tver else "[bold]TPM:[/bold] present")
+        if bool(status.get('spice')):
+            console.print("[bold]Console:[/bold] SPICE")
+
+        if bool(status.get('agent')):
+            console.print("\n[dim]Guest info available via QEMU Guest Agent (--with-osinfo).[/dim]")
 
     def start_vm(self, args):
         vmid = self._resolve_vm_identifier(args)
