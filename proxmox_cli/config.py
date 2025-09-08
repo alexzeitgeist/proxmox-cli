@@ -46,6 +46,8 @@ class Config:
     connect_timeout: int = 10
     read_timeout: int = 30
     profile: str = "default"
+    with_stats: bool = False
+    with_osinfo: bool = False
 
     @staticmethod
     def _parse_bool(value: Optional[str], default: bool = True) -> bool:
@@ -126,6 +128,8 @@ class Config:
         ca_cert_path = get_value("CA_CERT_PATH")
         connect_timeout = int(get_value("CONNECT_TIMEOUT", "10"))
         read_timeout = int(get_value("READ_TIMEOUT", "30"))
+        with_stats = cls._parse_bool(get_value("WITH_STATS", "false"), default=False)
+        with_osinfo = cls._parse_bool(get_value("WITH_OSINFO", "false"), default=False)
 
         if not token_name or not token_value:
             # Create config directory if it doesn't exist
@@ -153,6 +157,8 @@ class Config:
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
             profile=profile,
+            with_stats=with_stats,
+            with_osinfo=with_osinfo,
         )
 
     def validate(self) -> bool:

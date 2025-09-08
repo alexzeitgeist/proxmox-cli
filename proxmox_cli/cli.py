@@ -45,8 +45,10 @@ def create_parser():
     info_group.add_argument('vmid', type=int, nargs='?', help='VM ID')
     info_group.add_argument('--name', help='VM name')
     info_parser.add_argument('--node', help='Node name (optional, will auto-detect)')
-    info_parser.add_argument('--with-osinfo', action='store_true', help='Query guest OS and hostname via QEMU Guest Agent')
-    info_parser.add_argument('--with-stats', action='store_true', help='Include last-hour averages (RRD) for CPU/memory/network/disk')
+    info_parser.add_argument('--with-osinfo', action='store_true', default=None, help='Query guest OS and hostname via QEMU Guest Agent')
+    info_parser.add_argument('--no-osinfo', dest='with_osinfo', action='store_false', help='Disable OS/hostname query (overrides default)')
+    info_parser.add_argument('--with-stats', action='store_true', default=None, help='Include last-hour averages (RRD) for CPU/memory/network/disk')
+    info_parser.add_argument('--no-stats', dest='with_stats', action='store_false', help='Disable stats (overrides default)')
 
     # Start VM command
     start_parser = subparsers.add_parser('start', help='Start a VM')
@@ -117,6 +119,13 @@ def main():
         capabilities = client.discover_capabilities()
         if args.debug:
             err_console.print(f"[dim]Discovered: {capabilities}[/dim]")
+
+        # Apply config-driven defaults for flags when unset (None)
+        if args.command == 'info':
+            if getattr(args, 'with_stats', None) is None:
+                args.with_stats = bool(getattr(config, 'with_stats', False))
+            if getattr(args, 'with_osinfo', None) is None:
+                args.with_osinfo = bool(getattr(config, 'with_osinfo', False))
 
         commands = CLICommands(client, output_format=args.output)
     except Exception as e:
